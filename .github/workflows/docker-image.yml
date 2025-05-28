@@ -1,47 +1,63 @@
-name: Release Manager
+name: Release Pipeline
 
-# 🌟 关键配置：仅在用户推送特定格式的 tag 时触发流程
+# 📌 仅对标签推送触发并需通过 build 阶段
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]*"  # 匹配标准语义化版本，例如 v1.0.0、v2.1.4
+      - '*'
 
-# 🚀 多 Job 组合工作流（按需扩展）
 jobs:
-  # 📦 前置构建步骤（构建可执行文件/压缩包等）
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: Build Artifacts
+        run: echo "Simulating build process..." && mkdir -p dist && touch dist/app-${GITHUB_REF#refs/tags/}.zip
 
-      # ✨ 替换下方步骤为你实际的构建流程（根据项目需求定制）
-      - name: Build Project
-        run: |
-          echo "模拟构建过程..."
-          mkdir -p dist
-          touch dist/app-${{ github.ref_name }}.zip  
-
-  # 💫 创建 GitHub Release
+  # 🚀 定义 GitHub Release 发布模块
   publish-release:
-    needs: [build]  # 确保 build 模块先运行
-    runs-on: ubuntu-latest  
-    # 🔒 双重保险：仅在 tag push 时执行
-    if: startsWith(github.ref, 'refs/tags/')  
+    needs: [build]  # 必须等待 build 阶段完成
+    runs-on: ubuntu-latest
+    # 🧷 仅在标签事件时触发 (双重验证，即便 workflow 通过标签约束也建议保留)
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - name: Generate Changelog (可选)
+      # ▼▼▼ 核心修正点 (缺少此步骤会导致所有 git 操作失败) ▼▼▼
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0    # 🔥 必须设为0才能获取完整的tag和历史记录
+      
+      - name: Generate Changelog
         run: |
-          echo "# 变更日志" > changelog.md
-          git log $(git describe --tags --abbrev=0)...HEAD --oneline >> changelog.md  
+          # 💡 优雅处理首次tag版本日志
+          echo "# 变更日志 (版本 ${{ github.ref_name }})" > changelog.md
+          LATEST_TAG=$(git describe --tags --abbrev=0)          
+          if [ -z "$(git tag --list)" ]; then
+            # ➤ 如果是首个标签：全历史日志
+            git log --oneline | sed 's/^/> /' >> changelog.md
+          else
+            # ➤ 常规情况：与上个正式版本对比
+            PREV_TAG=$(git describe --tags --abbrev=0 ${LATEST_TAG}^) || true
+            if [ -z "$PREV_TAG" ]; then
+              # 📌 无上一个稳定tag时（如首个正式标签前的beta版本），仍全量记录
+              PREV_TAG=$(git rev-list --max-parents=0 HEAD) 
+            fi
+            echo "## 变更范围：[$PREV_TAG ➡ $LATEST_TAG]" >> changelog.md
+            git log ${PREV_TAG}..${LATEST_TAG} --oneline --no-decorate | sed 's/^/- /' >> changelog.md
+          fi
+
+          # 🕵️ 调试输出（安全查看内容）
+          cat changelog.md | head -n 5
           
-      - name: Release the Version
+      # ▼▼▼ 正式发布模块（使用官方推荐的最新 action 版本） ▼▼▼
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          # ✅ 正确抓取标签名（通过环境变量优化处理）
-          tag_name: ${{ github.ref_name }}  
-          name: "Release ${{ github.ref_name }}"  
-          body_path: changelog.md  # 或静态文案：body: "正式发布 ${{ github.ref_name }}..." 
-          files: |  # 📤 上传构建产物（根据实际路径调整）
-            dist/app-${{ github.ref_name }}.zip
-          draft: false  # 是否生成草稿
-          prerelease: ${{ contains(github.ref_name, '-beta') }}  # 自动识别是否预发布                                
+          name: "🎉 Release ${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}     # 直接提取触发的工作流标签名
+          body_path: changelog.md              # 引入动态生成的日志文件
+          draft: false                         # 立即发布
+          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          files: |
+            dist/app-${{ github.ref_name }}.zip  # ✔ 自动匹配构建产物
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
