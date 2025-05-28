@@ -1,0 +1,47 @@
+name: Release Manager
+
+# 🌟 关键配置：仅在用户推送特定格式的 tag 时触发流程
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"  # 匹配标准语义化版本，例如 v1.0.0、v2.1.4
+
+# 🚀 多 Job 组合工作流（按需扩展）
+jobs:
+  # 📦 前置构建步骤（构建可执行文件/压缩包等）
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      # ✨ 替换下方步骤为你实际的构建流程（根据项目需求定制）
+      - name: Build Project
+        run: |
+          echo "模拟构建过程..."
+          mkdir -p dist
+          touch dist/app-${{ github.ref_name }}.zip  
+
+  # 💫 创建 GitHub Release
+  publish-release:
+    needs: [build]  # 确保 build 模块先运行
+    runs-on: ubuntu-latest  
+    # 🔒 双重保险：仅在 tag push 时执行
+    if: startsWith(github.ref, 'refs/tags/')  
+    steps:
+      - name: Generate Changelog (可选)
+        run: |
+          echo "# 变更日志" > changelog.md
+          git log $(git describe --tags --abbrev=0)...HEAD --oneline >> changelog.md  
+          
+      - name: Release the Version
+        uses: softprops/action-gh-release@v1
+        with:
+          # ✅ 正确抓取标签名（通过环境变量优化处理）
+          tag_name: ${{ github.ref_name }}  
+          name: "Release ${{ github.ref_name }}"  
+          body_path: changelog.md  # 或静态文案：body: "正式发布 ${{ github.ref_name }}..." 
+          files: |  # 📤 上传构建产物（根据实际路径调整）
+            dist/app-${{ github.ref_name }}.zip
+          draft: false  # 是否生成草稿
+          prerelease: ${{ contains(github.ref_name, '-beta') }}  # 自动识别是否预发布                                
