@@ -41,8 +41,8 @@ jobs:
           mkdir -p dist
           # 🎯 Buildx 扩展方法更标准 (如需更优雅可增加缓存机制)
           docker build . \
-            ---tag avdc-docker:${{ env.DOCKER_TAG }} \
-            ---file ${{ github.workspace }}/Dockerfile  
+            --tag avdc-docker:${{ env.DOCKER_TAG }} \
+            --file ${{ github.workspace }}/Dockerfile  
           
           # 🗜️ 压缩方案兼容性优化 (推荐标准 tar.gz)
           docker save avdc-docker:${{ env.DOCKER_TAG }} | \ 
