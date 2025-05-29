@@ -1,10 +1,8 @@
 name: Release Manager
-
 on:
   push:
     tags:
       - "v[0-9]+\\.[0-9]+\\.[0-9]+"  # ✅ 严格匹配完整 SemVer (例如 v1.2.3)
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,7 +16,6 @@ jobs:
         with:
           # 📜 关键配置：必须获取全部提交历史才能使用 git-describe
           fetch-depth: 0  
-
       - name: Extract Tag Version
         id: tag_version  # 🔑 定义步骤唯一标识符
         run: |
@@ -32,7 +29,6 @@ jobs:
           
           # 📤 标准化输出变量 (注意：必须存至 GITHUB_OUTPUT) 
           echo "LATEST_TAG=$FINAL_VER" >> $GITHUB_OUTPUT 
-
       - name: Build and Save Docker Image
         working-directory: .  # 🖥 明确定义构建上下文
         env:
@@ -45,9 +41,8 @@ jobs:
             --file ${{ github.workspace }}/Dockerfile  
           
           # 🗜️ 压缩方案兼容性优化 (推荐标准 tar.gz)
-          docker save avdc-docker:${{ env.DOCKER_TAG }} | \ 
+          docker save avdc-docker:${{ env.DOCKER_TAG }} | \
             gzip > dist/avdc-docker_${{ env.DOCKER_TAG }}.tar.gz
-
   publish-release:
     needs: [build]  # ⛓ 严格按照步骤执行顺序
     runs-on: ubuntu-latest
@@ -57,6 +52,10 @@ jobs:
       github.event_name == 'push'
       
     steps:
+      - name: Checkout Code for Changelog
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Generate Dynamic Changelog (智能历史追溯)
         env:
           VERSION_TAG: ${{ needs.build.outputs.image_tag }}
@@ -78,12 +77,15 @@ jobs:
             # 🕘 TimeBased格式："%ad %h %s"
             LOG_CMD="git log \"$COMPARE_POINT..HEAD\" --oneline --date=iso-strict"
             echo "## 对比区间：$COMPARE_POINT ➔ $VERSION_TAG" >> changelog.md  
-            $LOG_CMD >> changelog.md
+            eval $LOG_CMD >> changelog.md
           fi
           
-          # 🛸 包含容器镜像哈希作为追踪标识
-          echo -e "\n📦 Docker 镜像 ID: $(docker inspect avdc-docker:$VERSION_TAG --format '{{ .Id }}')" >> changelog.md
-
+          # 📦 包含容器镜像信息
+          echo -e "\n📦 Docker 镜像标签: avdc-docker:$VERSION_TAG" >> changelog.md
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
       - name: GH Release with Upload
         # 📦 强烈推荐使用支持缓存、幂等上传的新版本 Action
         uses: ncipollo/release-action@v1
