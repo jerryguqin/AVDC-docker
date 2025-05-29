@@ -1,0 +1,54 @@
+name: Release Manager
+
+on:
+  push:
+    tags:
+       - "v[0-9]+.[0-9]+.[0-9]*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+     outputs: # 创建版本输出通道
+       image_tag: ${{ steps.tag_version.outputs.LATEST_TAG }}
+    steps:
+      - name: Checkout Code
+         uses: actions/checkout@v4  # 统一升级到最新版本
+         with:                      # 获取全部 commit 历史以支持 describe
+           fetch-depth: 0
+
+       - name: Extract Tag Version    # 拆分版本识别阶段以便复用
+         id: tag_version
+        run: |
+           git fetch --all --tags  # 确保获取全部 tags (解决新标签初次触发的问题)
+           TAG=$(git describe --tags --abbrev=0)
+           echo "LATEST_TAG=$TAG" >> $GITHUB_OUTPUT  #  输出步骤结果
+ 
+       - name: Build and Save Docker Image
+         run: |
+           mkdir -p dist && cd dist
+           docker build .. --file ../Dockerfile -t avdc-docker:${{ steps.tag_version.outputs.LATEST_TAG }}
+           docker save avdc-docker | gzip > avdc-docker_${{ steps.tag_version.outputs.LATEST_TAG }}.tar.gz  # 修正文件名 (使用下划线与压缩)
+
+  publish-release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Generate Changelog (可选)
+        run: |
+           PREV_TAG=$(git describe --abbrev=0 --tags v${{ steps.tag_version.outputs.LATEST_TAG }}*)  # 找到上一标签以准确生成区间日志
+           echo "## 变更历史 ($PREV_TAG..${{ needs.build.outputs.image_tag }})" >> changelog.md
+           git log $PREV_TAG..HEAD --pretty=format:\"%h %s%n\" >> changelog.md
+
+      - name: Release the Version
+        uses: softprops/action-gh-release@v1
+         env:  # 明确传递 token
+           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Release ${{ github.ref_name }}"
+          body_path: changelog.md
+          files: |
+             dist/avdc-docker_${{ needs.build.outputs.image_tag }}.tar.gz
+          draft: false
+           prerelease: ${{ contains(needs.build.outputs.image_tag, '-beta') }}  # 结合 tag 逻辑优化测试条件
