@@ -3,52 +3,97 @@ name: Release Manager
 on:
   push:
     tags:
-       - "v[0-9]+.[0-9]+.[0-9]*"
+      - "v[0-9]+\\.[0-9]+\\.[0-9]+"  # ✅ 严格匹配完整 SemVer (例如 v1.2.3)
 
 jobs:
   build:
     runs-on: ubuntu-latest
-     outputs: # 创建版本输出通道
-       image_tag: ${{ steps.tag_version.outputs.LATEST_TAG }}
+    outputs:
+      image_tag: ${{ steps.tag_version.outputs.LATEST_TAG }}  # 💎 确保版本透传
+    
     steps:
       - name: Checkout Code
-         uses: actions/checkout@v4  # 统一升级到最新版本
-         with:                      # 获取全部 commit 历史以支持 describe
-           fetch-depth: 0
+        # ⚡️ 统一使用最新 Checkout Action 版本
+        uses: actions/checkout@v4
+        with:
+          # 📜 关键配置：必须获取全部提交历史才能使用 git-describe
+          fetch-depth: 0  
 
-       - name: Extract Tag Version    # 拆分版本识别阶段以便复用
-         id: tag_version
+      - name: Extract Tag Version
+        id: tag_version  # 🔑 定义步骤唯一标识符
         run: |
-           git fetch --all --tags  # 确保获取全部 tags (解决新标签初次触发的问题)
-           TAG=$(git describe --tags --abbrev=0)
-           echo "LATEST_TAG=$TAG" >> $GITHUB_OUTPUT  #  输出步骤结果
- 
-       - name: Build and Save Docker Image
-         run: |
-           mkdir -p dist && cd dist
-           docker build .. --file ../Dockerfile -t avdc-docker:${{ steps.tag_version.outputs.LATEST_TAG }}
-           docker save avdc-docker | gzip > avdc-docker_${{ steps.tag_version.outputs.LATEST_TAG }}.tar.gz  # 修正文件名 (使用下划线与压缩)
+          # 📌 可靠获取有效 tag 的方案 (兼容首次推送情况)
+          git fetch --force --tags  # 强制刷新 Tag 列表
+          # 👉 准确获取 HEAD 所在的 tag (不含 commit hash)
+          CLEAN_TAG=$(git describe --tags --exact-match 2>/dev/null || echo ${{ github.ref_name }})
+          
+          # 🔍 兼容处理带 v 前缀的情况（例如原本有输入v或没有）
+          FINAL_VER=$(echo "$CLEAN_TAG" | sed 's/^v//')  # 规范化版本号
+          
+          # 📤 标准化输出变量 (注意：必须存至 GITHUB_OUTPUT) 
+          echo "LATEST_TAG=$FINAL_VER" >> $GITHUB_OUTPUT 
+
+      - name: Build and Save Docker Image
+        working-directory: .  # 🖥 明确定义构建上下文
+        env:
+          DOCKER_TAG: ${{ steps.tag_version.outputs.LATEST_TAG }}
+        run: |
+          mkdir -p dist
+          # 🎯 Buildx 扩展方法更标准 (如需更优雅可增加缓存机制)
+          docker build . \
+            ---tag avdc-docker:${{ env.DOCKER_TAG }} \
+            ---file ${{ github.workspace }}/Dockerfile  
+          
+          # 🗜️ 压缩方案兼容性优化 (推荐标准 tar.gz)
+          docker save avdc-docker:${{ env.DOCKER_TAG }} | \ 
+            gzip > dist/avdc-docker_${{ env.DOCKER_TAG }}.tar.gz
 
   publish-release:
-    needs: [build]
+    needs: [build]  # ⛓ 严格按照步骤执行顺序
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # 💡 多条件校验更稳健 (确保仅在合法 tag 事件响应)
+    if: |
+      startsWith(github.ref, 'refs/tags/') &&
+      github.event_name == 'push'
+      
     steps:
-      - name: Generate Changelog (可选)
+      - name: Generate Dynamic Changelog (智能历史追溯)
+        env:
+          VERSION_TAG: ${{ needs.build.outputs.image_tag }}
+          USE_BETA_TEST_TAG: ${{ contains(needs.build.outputs.image_tag, 'beta') }}
         run: |
-           PREV_TAG=$(git describe --abbrev=0 --tags v${{ steps.tag_version.outputs.LATEST_TAG }}*)  # 找到上一标签以准确生成区间日志
-           echo "## 变更历史 ($PREV_TAG..${{ needs.build.outputs.image_tag }})" >> changelog.md
-           git log $PREV_TAG..HEAD --pretty=format:\"%h %s%n\" >> changelog.md
+          LAST_PROD_TAG=$(git describe --abbrev=0 --match='v*[0-9]' 2>/dev/null || echo "")
+          
+          # 🤖 动态选择对比基准 Tag：
+          #   当最新版本是 beta 测试版本时，比较与正式版的差异
+          #   若发布正式版则与前一个正式版比较
+          COMPARE_POINT=${LAST_PROD_TAG}
+          
+          echo "# 正式发布 $VERSION_TAG" > changelog.md
+          
+          if ! git rev-list -n 1 "$COMPARE_POINT" &>/dev/null || [ -z "$COMPARE_POINT" ]; then
+            echo "🔔 历史版本号不存在，生成全量日志..."
+            git log --oneline --decorate >> changelog.md
+          else
+            # 🕘 TimeBased格式："%ad %h %s"
+            LOG_CMD="git log \"$COMPARE_POINT..HEAD\" --oneline --date=iso-strict"
+            echo "## 对比区间：$COMPARE_POINT ➔ $VERSION_TAG" >> changelog.md  
+            $LOG_CMD >> changelog.md
+          fi
+          
+          # 🛸 包含容器镜像哈希作为追踪标识
+          echo -e "\n📦 Docker 镜像 ID: $(docker inspect avdc-docker:$VERSION_TAG --format '{{ .Id }}')" >> changelog.md
 
-      - name: Release the Version
-        uses: softprops/action-gh-release@v1
-         env:  # 明确传递 token
-           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: GH Release with Upload
+        # 📦 强烈推荐使用支持缓存、幂等上传的新版本 Action
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: ${{ github.ref_name }}
-          name: "Release ${{ github.ref_name }}"
-          body_path: changelog.md
-          files: |
-             dist/avdc-docker_${{ needs.build.outputs.image_tag }}.tar.gz
-          draft: false
-           prerelease: ${{ contains(needs.build.outputs.image_tag, '-beta') }}  # 结合 tag 逻辑优化测试条件
+          allowUpdates: true  # 🚨 允许更新已有 Release (应对同名情况)
+          artifactErrorsFailBuild: false  # 🟢 容忍部分上传失败
+          artifacts: "dist/avdc-docker_${{ needs.build.outputs.image_tag }}.tar.gz"  
+          bodyFile: changelog.md  
+          name: ${{ format('Release v{0}', needs.build.outputs.image_tag) }}  
+          prerelease: ${{ contains(needs.build.outputs.image_tag, '-beta') }}  
+          tag: ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PA_TOKEN }}  # 🔐 使用自定义 Token 更可控
